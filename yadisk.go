@@ -16,36 +16,34 @@ import (
 )
 
 const (
-	baseURL           = "https://cloud-api.yandex.net/v1/disk/resources"
-	discordWebhookURL = "https://discord.com/api/webhooks/1461275313739792416/5QYNXuzvX6fr6LCVobj-FLr3hqk3GR-vMZT99MWl3gBmxwobUhCU1x1TFyYWJ2fAzYoG"
-	discordAvatarURL  = "https://raw.githubusercontent.com/google/material-design-icons/refs/heads/master/png/action/backup/materialicons/48dp/2x/baseline_backup_black_48dp.png"
-	discordBotName    = "Backup System"
+	baseURL          = "https://cloud-api.yandex.net/v1/disk/resources"
+	discordAvatarURL = "https://raw.githubusercontent.com/google/material-design-icons/refs/heads/master/png/action/backup/materialicons/48dp/2x/baseline_backup_black_48dp.png"
+	discordBotName   = "Backup System"
 )
 
-// --- ДИНАМИЧЕСКИЕ ПУТИ ---
-// Мы используем переменные, чтобы определить их при старте
+// --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 var (
-	LocalBackupDir string
-	DockerPath     string
-	SillyPath      string
-	// Этот путь абсолютный, его оставляем как есть (если он меняется, тоже можно вынести)
-	UfwRulesPath    = "/etc/ufw/user.rules" 
+	// Пути (определяются в init)
+	LocalBackupDir  string
+	DockerPath      string
+	SillyPath       string
+	UfwRulesPath    = "/etc/ufw/user.rules"
 	RemoteBackupDir = "/backup/"
+
+	// Вебхук (определяется через флаг)
+	discordWebhookURL string
 )
 
-// Функция init выполняется автоматически перед main
 func init() {
-	// Получаем домашнюю директорию текущего пользователя (/home/user или /root)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("Ошибка определения домашней директории: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Формируем пути относительно домашней папки
-	LocalBackupDir = filepath.Join(homeDir, "backups")          // ~/backups
-	DockerPath = filepath.Join(homeDir, "docker")               // ~/docker
-	SillyPath = filepath.Join(homeDir, "docker", "sillytavern") // ~/docker/sillytavern
+	LocalBackupDir = filepath.Join(homeDir, "backups")
+	DockerPath = filepath.Join(homeDir, "docker")
+	SillyPath = filepath.Join(homeDir, "docker", "sillytavern")
 }
 
 // Структуры для Яндекса
@@ -83,6 +81,9 @@ func main() {
 	prefix := flag.String("prefix", "", "Префикс поиска (для download)")
 	remotePath := flag.String("remote", "", "Папка на Диске (необязательно)")
 
+	// Новый флаг для вебхука (привязываем прямо к глобальной переменной)
+	flag.StringVar(&discordWebhookURL, "webhook", "", "URL вебхука Discord (если пустой, уведомления отключены)")
+
 	flag.Parse()
 
 	if *token == "" {
@@ -116,9 +117,8 @@ func main() {
 // --- ЛОГИКА БЕКАПА ---
 func runFullBackup(client *http.Client, token, password string) {
 	dateStr := time.Now().Format("20060102_150405")
-	tmpDir := filepath.Join(os.TempDir(), "backup_work") // Используем системный temp
+	tmpDir := filepath.Join(os.TempDir(), "backup_work")
 
-	// Имена архивов
 	mainArchiveName := fmt.Sprintf("backup_main-%s.7z", dateStr)
 	sillyArchiveName := fmt.Sprintf("backup_silly-%s.7z", dateStr)
 	
@@ -126,27 +126,19 @@ func runFullBackup(client *http.Client, token, password string) {
 	sillyArchivePath := filepath.Join(LocalBackupDir, sillyArchiveName)
 
 	fmt.Println("=== Запуск процесса архивации ===")
-	// Для отладки выводим пути
-	fmt.Printf("Рабочая директория: %s\n", LocalBackupDir)
 
-
-	// 1. Подготовка директорий
 	if err := os.MkdirAll(LocalBackupDir, 0755); err != nil {
 		fatalError("Не удалось создать папку бекапов %s: %v", LocalBackupDir, err)
 	}
 	os.MkdirAll(tmpDir, 0755)
 	defer os.RemoveAll(tmpDir)
 
-	// 2. Копирование UFW rules
 	tmpUfwPath := filepath.Join(tmpDir, "user.rules")
-	// Пытаемся скопировать, если нет прав - просто предупреждаем, но не падаем
 	if err := copyFile(UfwRulesPath, tmpUfwPath); err != nil {
-		fmt.Printf("Внимание: Не удалось скопировать UFW rules (возможно нет прав): %v\n", err)
-		// Создаем пустой файл заглушку, чтобы 7z не ругался
-		os.Create(tmpUfwPath) 
+		fmt.Printf("Внимание: Не удалось скопировать UFW rules: %v\n", err)
+		os.Create(tmpUfwPath)
 	}
 
-	// 3. Создание ОСНОВНОГО архива
 	fmt.Println("Архивация Main...")
 	argsMain := []string{
 		"a", "-m0=lzma2", "-mx=9", "-p" + password, "-mhe=on",
@@ -159,7 +151,6 @@ func runFullBackup(client *http.Client, token, password string) {
 		fatalError("Ошибка создания Main архива: %v", err)
 	}
 
-	// 4. Создание SILLY архива
 	fmt.Println("Архивация SillyTavern...")
 	argsSilly := []string{
 		"a", "-m0=lzma2", "-mx=9", "-p" + password, "-mhe=on",
@@ -170,7 +161,6 @@ func runFullBackup(client *http.Client, token, password string) {
 		fatalError("Ошибка создания Silly архива: %v", err)
 	}
 
-	// 5. Загрузка в облако
 	uploadFile(client, token, mainArchivePath, RemoteBackupDir)
 	uploadFile(client, token, sillyArchivePath, RemoteBackupDir)
 
@@ -179,7 +169,6 @@ func runFullBackup(client *http.Client, token, password string) {
 
 func run7z(args []string) error {
 	cmd := exec.Command("7z", args...)
-	// cmd.Stdout = os.Stdout // Можно раскомментировать для отладки
 	return cmd.Run()
 }
 
@@ -198,6 +187,11 @@ func copyFile(src, dst string) error {
 
 // --- ОТПРАВКА В DISCORD ---
 func sendDiscord(message string) {
+	// Если URL не задан, просто выходим
+	if discordWebhookURL == "" {
+		return
+	}
+
 	payload := DiscordPayload{
 		Content:   message,
 		Username:  discordBotName,
@@ -232,7 +226,6 @@ func uploadFile(client *http.Client, token, localPath, remoteDir string) {
 	fileName := filepath.Base(localPath)
 	destPath := filepath.Join(remoteDir, fileName)
 
-	// 1. Получаем URL загрузки
 	reqUrl := fmt.Sprintf("%s/upload?path=%s&overwrite=true", baseURL, url.QueryEscape(destPath))
 	req, _ := http.NewRequest("GET", reqUrl, nil)
 	req.Header.Add("Authorization", "OAuth "+token)
@@ -255,7 +248,6 @@ func uploadFile(client *http.Client, token, localPath, remoteDir string) {
 		fatalError("Ошибка JSON: %v", err)
 	}
 
-	// 2. Загружаем байты
 	stat, _ := file.Stat()
 	putReq, _ := http.NewRequest("PUT", link.Href, file)
 	putReq.ContentLength = stat.Size()
@@ -276,7 +268,6 @@ func uploadFile(client *http.Client, token, localPath, remoteDir string) {
 
 // --- ФУНКЦИЯ СКАЧИВАНИЯ ---
 func downloadNewest(client *http.Client, token, prefix, remoteDir string) {
-	// 1. Список
 	reqUrl := fmt.Sprintf("%s?path=%s&sort=-created&limit=100", baseURL, url.QueryEscape(remoteDir))
 	req, _ := http.NewRequest("GET", reqUrl, nil)
 	req.Header.Add("Authorization", "OAuth "+token)
@@ -296,7 +287,6 @@ func downloadNewest(client *http.Client, token, prefix, remoteDir string) {
 		fatalError("Ошибка JSON списка: %v", err)
 	}
 
-	// 2. Поиск
 	var targetFile string
 	var targetName string
 	for _, item := range list.Embedded.Items {
@@ -312,7 +302,6 @@ func downloadNewest(client *http.Client, token, prefix, remoteDir string) {
 		fatalError("Файл '%s' не найден", prefix)
 	}
 
-	// 3. Ссылка
 	dlUrl := fmt.Sprintf("%s/download?path=%s", baseURL, url.QueryEscape(targetFile))
 	dlReq, _ := http.NewRequest("GET", dlUrl, nil)
 	dlReq.Header.Add("Authorization", "OAuth "+token)
@@ -328,7 +317,6 @@ func downloadNewest(client *http.Client, token, prefix, remoteDir string) {
 		fatalError("Ошибка ссылки JSON")
 	}
 
-	// 4. Скачивание
 	fileResp, err := http.Get(link.Href)
 	if err != nil {
 		fatalError("Ошибка скачивания: %v", err)
